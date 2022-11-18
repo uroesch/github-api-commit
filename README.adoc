@@ -1,0 +1,271 @@
+= File Creation over the Github API
+:author: Urs Roesch
+:author:    Urs Roesch
+:firstname: Urs
+:lastname:  Roesch
+:email:     github@bun.ch
+:revnumber: 0.7.1
+:keywords:  PowerShell, CLI, Github, Gitlab
+:!toc:
+:icons: font
+:git-user: uroesch
+:repo-name: pdftools
+ifdef::env-gitlab[]
+:base-url:   https://gitlab.com/{git-user}/{repo-name}
+:email:      gitlab@bun.ch
+endif::env-gitlab[]
+ifdef::env-github[]
+:base-url:          https://github.com/{git-user}/{repo-name}
+:email:             github@bun.ch
+:tip-caption:       :bulb:
+:note-caption:      :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption:   :fire:
+:warning-caption:   :warning:
+endif::env-github[]
+
+
+== Powershell
+
+=== Github
+
+==== Installation
+
+[source,console]
+----
+> Install-Module -Name PowerShellForGitHub
+----
+
+==== Set authentication credentials
+
+[source,console]
+----
+> $secret   = ( ` <1>
+    sops exec-env secrets.yaml 'echo $SANDBOX_TOKEN' | `
+    ConvertTo-SecureString -AsPlainText -Force `
+  )
+> $credentials = New-Object System.Management.Automation.PSCredential ` <2>
+    "username is ignored", `
+    $secret
+> Set-GitHubAuthentication -Credential $credentials <3>
+----
+<1> Extract the token from the `secrets.yaml` file via `sops`.
+<2> Create a new credential object for use with the Github API.
+<3> Set the Github Credential for use with the API.
+
+==== Create a commit
+
+To create push a commit of a file called `bar.txt` into the directory `foo` in
+branch `main` use the following PowerShell command.
+
+[source,console]
+----
+> Set-GitHubContent ` <1>
+  -OwnerName $Owner `
+  -RepositoryName $RepoName `
+  -Path foo/bar.txt ` <2>
+  -CommitMessage 'Adding foobar.txt' `
+  -Content 'This is a text message' `
+  -BranchName main
+----
+<1> Call the funtion which abstracts creating a commit.
+<2> The directory and file name can be arbitrary and do not need to exist prior
+    to the commit as directories aka tree objects are `virtual` in Git.
+
+=== Gitlab
+
+==== Installation
+
+Not required. Using the base PowerShell functionality.
+
+===== Authentication
+
+This is just an excerpt how to use `sops` to get access to the Gitlab token.
+Further down where the whole script is included this code will be shown in
+context.
+
+----
+$SecretFile    = 'secrets.yaml'
+
+Function Gitlab-Token {
+  $Token = ( sops exec-env secrets.yaml 'echo $GITLAB_COM_TOKEN' ) <1>
+  Return $Token
+}
+----
+<1> Extract the token with sops
+
+===== Create a commit
+
+It is a bit more involved then with Github as the commit is managed with the
+available powershell builtins. But with a bit abstraction one can achieve the
+same easy interface. There is slightly more code due to the fact that we roll
+our own.
+
+[source,powershell]
+----
+#!/usr/bin/env pwsh
+
+$SecretFile    = 'secrets.yaml'
+$Owner         = 'uroesch'
+$RepoName      = 'gitlab-api-commit'
+$GitlabBaseUrl = 'https://gitlab.com/api/v4/projects'
+
+Filter UrlEncode {
+  [System.Web.HTTPUtility]::UrlEncode($_)
+}
+
+Function Gitlab-Token {
+  $Token = ( sops exec-env secrets.yaml 'echo $GITLAB_COM_TOKEN' )
+  Return $Token
+}
+
+Function Gitlab-Headers {
+  Return @{
+    'PRIVATE-TOKEN' = Gitlab-Token
+    'Accept'        = 'application/json'
+  }
+}
+
+Function Gitlab-Url {
+
+  Param (
+    [String] $Owner,
+    [String] $Repo,
+    [String] $Action
+  )
+  $ProjectId = @($Owner, $Repo) -join "/" | UrlEncode
+  Return @($GitlabBaseUrl, $ProjectId, 'repository', $Action) -join "/"
+}
+
+Function Gitlab-Commit {
+
+  Param ( <1>
+    [String] $OwnerName,
+    [String] $RepositoryName,
+    [String] $CommitMessage,
+    [String] $Path,
+    [String] $Content,
+    [String] $BranchName
+  )
+
+  $Body = @{ <2>
+    branch         = $BranchName
+    commit_message = $CommitMessage
+    actions        = @(
+      @{
+         action     = "create"
+         file_path  = $Path
+         content    = $Content
+      }
+    )
+  } | ConvertTo-Json <3>
+  $Uri = Gitlab-Url -Owner $OwnerName -Repo $RepositoryName -Action 'commits'
+
+  Invoke-RestMethod ` <4>
+    -Method Post `
+    -ContentType 'application/json' `
+    -Headers $(Gitlab-Headers) `
+    -Body $Body `
+    -Uri $Uri
+}
+
+Gitlab-Commit `
+  -OwnerName $Owner `
+  -RepositoryName $RepoName `
+  -BranchName 'main' `
+  -CommitMessage "Commit message 1" `
+  -Path "Files/Message2.txt" `
+  -Content "Message 2"
+----
+<1> Create a similar interface to the Github API
+<2> Create the body hash to be sent.
+<3> Convert to JSON
+<4> Submit the post request to Gitlab.
+
+== Shell
+
+=== Prerequisites
+
+* https://curl.se/[curl]
+* https://stedolan.github.io/jq/[jq]
+
+=== Github
+
+To create a github commit you have to recreate all the steps that the `git
+commit` command is doing in the background manually. As the code and the list of
+steps is long here a high level overview:
+
+. Fetch the SHA of the latest commit of the branch where the commit will end up.
+. Create a blob object.
+. Create a tree object with a reference to the blob object.
+. Create a commit with the tree object.
+. Update the HEAD of the branch.
+
+=== Gitlab
+
+In this example a Bash script is used to commit a single file to a git
+repository.
+
+[source,shell]
+----
+#!/usr/bin/env bash
+
+declare -r SECRETS_FILE=secrets.yaml
+declare -r GITLAB_PROJECT=uroesch/gitlab-api-commit
+declare -r GITLAB_PROJECT_ID=${GITLAB_PROJECT//\//%2F}
+declare -r GITLAB_URL="https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}"
+declare -r COMMIT_TEMPLATE="$(cat <<JSON | jq -r -c  <1>
+  {
+    "branch": "%s",
+    "commit_message": "%s",
+    "actions": [
+      {
+        "action": "create",
+        "file_path": "%s",
+        "content": "%s"
+      }
+    ]
+  }
+JSON
+)"
+
+export GITLAB_TOKEN=$(sops exec-env ${SECRETS_FILE} 'echo ${GITLAB_COM_TOKEN}')
+
+function gitlab_curl() { <2>
+  local url=${1}; shift;
+  local data="${@}"
+  curl \
+  --silent \
+  --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+  --header "Accept: application/json" \
+  ${data:+--header "Content-Type: application/json"} \
+  ${data:+--data "${data}"} \
+  ${GITLAB_URL}/${url}
+}
+
+function gitlab_commit() { <3>
+  local branch=${1}; shift;
+  local message=${1}; shift;
+  local path=${1}; shift;
+  local content=${1}; shift;
+
+  gitlab_curl repository/commits $( \
+    printf "${COMMIT_TEMPLATE}" \
+     "${branch}" \
+     "${message}" \
+     "${path}" \
+     "${content}" \
+  )
+}
+
+gitlab_commit \
+  "main" \
+  "my api first commit" \
+  "foobar/barfoo.txt" \
+  "File content for foobar/barfoo.txt"
+----
+<1> JSON object for commit with placeholders.
+<2> Generic `curl` wrapper` with Gitlab headers.
+<3> Wrapper to abstract the commit action.
+
+// vim: set colorcolumn=80 textwidth=80 spell spelllang=en_us :

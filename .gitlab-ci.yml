@@ -1,0 +1,22 @@
+.linux-build:
+  stage: build
+  script:
+    - |
+      git show --name-only --pretty=format:"" | while read file; do
+        [[ -f ${file} ]] && echo ${file}
+      done
+
+puzzle:linux-build:
+  extends: .linux-build
+  rules:
+    - if: $CI_SERVER_HOST == 'gitlab.puzzle.com'
+  tags:
+    - packer
+
+bunch:linux-build:
+  extends: .linux-build
+  rules:
+    - if: $CI_SERVER_HOST == 'gitlab.com'
+  tags:
+    - bun.ch
+
